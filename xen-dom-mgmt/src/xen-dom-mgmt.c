@@ -213,14 +213,14 @@ static int prepare_domain_physmap(int domid, uint64_t base_pfn, struct xen_domai
 
 static uint64_t get_dtb_addr(uint64_t rambase, uint64_t ramsize,
 							 uint64_t kernbase, uint64_t kernsize,
-							 uint64_t dtbsize)
+							 uint64_t dtbsize, uint64_t initrd_size)
 {
 	const uint64_t dtb_len = ROUND_UP(dtbsize, MB(2));
 	const uint64_t ramend = rambase + ramsize;
 	const uint64_t ram128mb = rambase + MB(128);
 	const uint64_t kernsize_aligned = ROUND_UP(kernsize, MB(2));
 	const uint64_t kernend = kernbase + kernsize;
-	const uint64_t modsize = dtb_len;
+	const uint64_t modsize = dtb_len + ROUND_UP(initrd_size, MB(2));
 	uint64_t modbase;
 
 	LOG_INF("rambase = %llx, ramsize = %llu", rambase, ramsize);
@@ -347,6 +347,9 @@ static int probe_zimage(int domid, uint64_t base_addr,
 	uint64_t load_gfn;
 	uint64_t domain_size = 0;
 	uint64_t nr_pages;
+	uint64_t ramdisk_size = 0;
+	uint64_t initrd_addr = 0;
+	void *mapped_ramdisk = NULL;
 	char *fdt;
 	size_t fdt_size;
 
@@ -379,20 +382,37 @@ static int probe_zimage(int domid, uint64_t base_addr,
 		zhdr.text_offset, base_addr, nr_pages,
 		nr_pages * XEN_PAGE_SIZE);
 
-	rc = gen_domain_fdt(domcfg, (void **)&fdt, &fdt_size,
-			   XEN_VERSION_MAJOR, XEN_VERSION_MINOR,
-			   (void *)domcfg->dtb_start,
-			   domcfg->dtb_end - domcfg->dtb_start, domid);
-	if (rc || fdt_size == 0) {
-		LOG_ERR("Failed to generate domain FDT (rc=%d)", rc);
+	/* Determine ramdisk (initrd) size if a ramdisk was configured. */
+	if (domcfg->get_ramdisk_size) {
+		rc = domcfg->get_ramdisk_size(domcfg->image_info, &ramdisk_size);
+		if (rc < 0 || ramdisk_size == 0) {
+			LOG_DBG("No ramdisk provided for domid#%d", domid);
+			ramdisk_size = 0;
+		}
+	}
+
+	/*
+	 * Place the DTB (+initrd) and compute the initrd guest address before
+	 * generating the FDT, so the initrd start/end can be added to the
+	 * chosen node.
+	 */
+	dtb_addr = get_dtb_addr(base_addr, KB(domcfg->mem_kb), load_addr,
+				domain_size, fdt_size, ramdisk_size);
+	if (!dtb_addr) {
+		LOG_ERR("Failed to get dtb addr for domid#%d", domid);
 		return -ENOMEM;
 	}
 
-	dtb_addr = get_dtb_addr(base_addr, KB(domcfg->mem_kb), load_addr,
-				domain_size, fdt_size);
-	if (!dtb_addr) {
-		LOG_ERR("Failed to get dtb addr for domid#%d", domid);
-		goto out_dtb;
+	initrd_addr = dtb_addr + ROUND_UP(fdt_size, MB(2));
+
+	rc = gen_domain_fdt(domcfg, (void **)&fdt, &fdt_size,
+			   XEN_VERSION_MAJOR, XEN_VERSION_MINOR,
+			   (void *)domcfg->dtb_start,
+			   domcfg->dtb_end - domcfg->dtb_start, domid,
+			   initrd_addr, ramdisk_size);
+	if (rc || fdt_size == 0) {
+		LOG_ERR("Failed to generate domain FDT (rc=%d)", rc);
+		return -ENOMEM;
 	}
 
 	modules->dtb_addr = dtb_addr;
@@ -448,10 +468,41 @@ static int probe_zimage(int domid, uint64_t base_addr,
 		goto out_dtb;
 	}
 
+	/* Load the ramdisk (initrd) just after the DTB, if provided. */
+	if (ramdisk_size > 0 && domcfg->load_ramdisk_bytes) {
+		uint64_t rd_pages = DIV_ROUND_UP(ramdisk_size, XEN_PAGE_SIZE);
+		uint64_t initrd_gfn = XEN_PHYS_PFN(initrd_addr);
+
+		rc = xenmem_map_region(domid, rd_pages, initrd_gfn,
+					&mapped_ramdisk);
+		if (rc) {
+			LOG_ERR("Failed to map ramdisk GFN for domid#%d (rc=%d)",
+				domid, rc);
+			goto out_dtb;
+		}
+
+		rc = domcfg->load_ramdisk_bytes(mapped_ramdisk, ramdisk_size,
+						0, domcfg->image_info);
+		if (rc < 0) {
+			LOG_ERR("Error calling load_ramdisk_bytes rc: %d", rc);
+			xenmem_unmap_region(rd_pages, mapped_ramdisk);
+			goto out_dtb;
+		}
+
+		rc = xenmem_cacheflush_mapped_pfns(rd_pages,
+						   xen_virt_to_gfn(mapped_ramdisk));
+		if (rc) {
+			LOG_ERR("Failed to flush ramdisk for domid#%d (rc=%d)",
+				domid, rc);
+		}
+
+		xenmem_unmap_region(rd_pages, mapped_ramdisk);
+	}
+
 	/* .text start address in domU memory */
 	modules->ventry = load_addr;
 	rc = 0;
- out_dtb:
+	out_dtb:
 	free_domain_fdt(fdt);
 	return rc;
 }

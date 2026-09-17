@@ -178,6 +178,9 @@ struct xen_domain_cfg {
 	load_image_bytes_t load_image_bytes;
 	get_image_size_t get_image_size;
 
+	load_image_bytes_t load_ramdisk_bytes;
+	get_image_size_t get_ramdisk_size;
+
 	void *image_info;
 
 	struct backend_configuration back_cfg;

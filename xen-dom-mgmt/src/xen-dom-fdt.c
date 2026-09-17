@@ -192,7 +192,8 @@ static int fdt_property_regs(void *fdt, unsigned int addr_cells,
 	return fdt_property(fdt, "reg", regs, sizeof(regs));
 }
 
-static int create_chosen(void *fdt, const char *cmdline)
+static int create_chosen(void *fdt, const char *cmdline,
+			 uint64_t initrd_start, uint64_t initrd_size)
 {
 	int res;
 
@@ -208,6 +209,16 @@ static int create_chosen(void *fdt, const char *cmdline)
 	res = fdt_property_string(fdt, "bootargs", cmdline);
 	if (res)
 		return res;
+
+	if (initrd_size > 0) {
+		res = fdt_property_u64(fdt, "linux,initrd-start", initrd_start);
+		if (res)
+			return res;
+		res = fdt_property_u64(fdt, "linux,initrd-end",
+					initrd_start + initrd_size);
+		if (res)
+			return res;
+	}
 
 	res = fdt_end_node(fdt);
 	if (res)
@@ -828,7 +839,8 @@ static inline int fdt_to_errno(int rc)
 
 int gen_domain_fdt(struct xen_domain_cfg *domcfg, void **fdtaddr,
 		  size_t *fdtsize, int xen_major, int xen_minor,
-		  void *pfdt, size_t pfdt_size, int domid)
+		  void *pfdt, size_t pfdt_size, int domid,
+		  uint64_t initrd_start, uint64_t initrd_size)
 {
 	int rc = 0;
 	int fdt_size = CONFIG_PARTIAL_DEVICE_TREE_SIZE;
@@ -866,7 +878,7 @@ int gen_domain_fdt(struct xen_domain_cfg *domcfg, void **fdtaddr,
 		goto err;
 	}
 
-	rc = create_chosen(fdt, domcfg->cmdline);
+	rc = create_chosen(fdt, domcfg->cmdline, initrd_start, initrd_size);
 	if (rc < 0) {
 		goto err;
 	}
@@ -969,7 +981,8 @@ void free_domain_fdt(void *fdt)
 #else /* CONFIG_XEN_LIBFDT */
 int gen_domain_fdt(struct xen_domain_cfg *domcfg, void **fdtaddr,
 		size_t *fdtsize, int xen_major, int xen_minor,
-		void *pfdt, size_t pfdt_size, int domid)
+		void *pfdt, size_t pfdt_size, int domid,
+		uint64_t initrd_start, uint64_t initrd_size)
 {
 	LOG_WRN("Domain device tree generation is not supported");
 	*fdtaddr = pfdt;
