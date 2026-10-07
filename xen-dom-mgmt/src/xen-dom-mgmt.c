@@ -186,12 +186,14 @@ static int allocate_magic_pages(int domid)
 }
 
 /* We need to populate magic pages and memory map here */
-static int prepare_domain_physmap(int domid, uint64_t base_pfn, struct xen_domain_cfg *cfg)
+static int prepare_domain_physmap(int domid, struct xen_domain_cfg *cfg)
 {
 	int rc;
 	uint64_t populated_gfn;
-	uint64_t nr_mem_exts =
-		DIV_ROUND_UP(cfg->mem_kb * 1024, PFN_2M_SIZE);
+	uint64_t mem_left = (uint64_t)cfg->mem_kb * 1024;
+	const uint64_t bankbase[] = GUEST_RAM_BANK_BASES;
+	const uint64_t banksize[] = GUEST_RAM_BANK_SIZES;
+	int i;
 
 	rc = allocate_magic_pages(domid);
 	if (rc) {
@@ -200,12 +202,29 @@ static int prepare_domain_physmap(int domid, uint64_t base_pfn, struct xen_domai
 		return rc;
 	}
 
-	populated_gfn = xenmem_populate_physmap(domid, base_pfn, PFN_2M_SHIFT,
-						nr_mem_exts);
-	if (populated_gfn != nr_mem_exts) {
-		LOG_ERR("Failed to populate physmap for domid#%d (populated only %llu instead of %llu)",
-			domid, populated_gfn, nr_mem_exts);
-		return -ENOMEM;
+	/*
+	 * Guest RAM is described to the guest as multiple banks
+	 * (GUEST_RAM_BANK_BASES) with a hole in between. Populate each
+	 * bank separately; otherwise only the first contiguous block
+	 * starting at GUEST_RAM0_BASE is mapped and the upper banks
+	 * (e.g. bank1 above 4GB) stay unmapped. The guest then faults
+	 * (HSR EC=0x24, stage-2 translation fault) the first time it
+	 * touches an unmapped RAM page, e.g. when clear_page() zeroes a
+	 * page allocated from the second bank.
+	 */
+	for (i = 0; i < GUEST_RAM_BANKS && mem_left > 0; i++) {
+		uint64_t bank_mem = MIN(mem_left, banksize[i]);
+		uint64_t nr_mem_exts = DIV_ROUND_UP(bank_mem, PFN_2M_SIZE);
+		uint64_t bank_pfn = XEN_PHYS_PFN(bankbase[i]);
+
+		populated_gfn = xenmem_populate_physmap(domid, bank_pfn,
+						       PFN_2M_SHIFT, nr_mem_exts);
+		if (populated_gfn != nr_mem_exts) {
+			LOG_ERR("Failed to populate physmap for domid#%d bank %d (populated only %llu instead of %llu)",
+				domid, i, populated_gfn, nr_mem_exts);
+			return -ENOMEM;
+		}
+		mem_left -= bank_mem;
 	}
 
 	return 0;
@@ -556,9 +575,8 @@ static int load_modules(int domid, struct xen_domain_cfg *domcfg,
 {
 	int rc;
 	uint64_t base_addr = GUEST_RAM0_BASE;
-	uint64_t base_pfn = XEN_PHYS_PFN(base_addr);
 
-	rc = prepare_domain_physmap(domid, base_pfn, domcfg);
+	rc = prepare_domain_physmap(domid, domcfg);
 	if (rc) {
 		LOG_ERR("Error preparing physmap (rc=%d)", rc);
 		return rc;

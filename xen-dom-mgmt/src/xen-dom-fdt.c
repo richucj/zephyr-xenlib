@@ -576,7 +576,7 @@ static int fill_hypervisor_regs(void *fdt, struct xen_domain_cfg *domcfg,
 
 		region_base[i] = bankbase[i] + ALIGN_UP_TO_2MB(mem_size);
 		bankend[i] = ~0ULL >> (64 - info.gpaddr_bits);
-		bankend[i] = MIN(bankend[i], bankbase[i] + banksize[i] - 1);
+		bankend[i] = MIN(bankend[i], bankbase[i] + mem_size - 1);
 
 		if (bankend[i] > region_base[i])
 			region_size[i] = bankend[i] - region_base[i] + 1;
@@ -602,8 +602,7 @@ static int fill_hypervisor_regs(void *fdt, struct xen_domain_cfg *domcfg,
 	}
 
 	if (!nr_regions) {
-		LOG_ERR("Unable to allocate extended regions");
-		return -ENOMEM;
+		LOG_WRN("No extended regions available; guest will use DTB memory only");
 	}
 
 	len = sizeof(regs[0]) *
