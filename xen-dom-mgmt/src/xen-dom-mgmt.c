@@ -370,7 +370,7 @@ static int probe_zimage(int domid, uint64_t base_addr,
 	uint64_t initrd_addr = 0;
 	void *mapped_ramdisk = NULL;
 	char *fdt;
-	size_t fdt_size;
+	size_t fdt_size = CONFIG_PARTIAL_DEVICE_TREE_SIZE;
 
 	struct zimage64_hdr zhdr;
 	uint64_t load_addr;
